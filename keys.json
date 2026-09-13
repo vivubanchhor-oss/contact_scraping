@@ -1,0 +1,48 @@
+{
+  "_comment": "Config for enricher.py. Any key starting with '_' is a comment and is ignored. Replace every REPLACE_ placeholder before running.",
+
+  "_comment_apify_keys": "One entry per Apify account. token = Apify API token (Console > Settings > API & Integrations). label = unique name used in logs/progress.json. linkedin_cookie = your LinkedIn li_at cookie ('li_at=AQED...' or just the value), or null if this account should not run the phone scraper.",
+  "apify_keys": [
+    { "token": "apify_api_REPLACE_WITH_TOKEN_1", "label": "account-1", "linkedin_cookie": "li_at=REPLACE_WITH_LI_AT_COOKIE" },
+    { "token": "apify_api_REPLACE_WITH_TOKEN_2", "label": "account-2", "linkedin_cookie": null },
+    { "token": "apify_api_REPLACE_WITH_TOKEN_3", "label": "account-3", "linkedin_cookie": "li_at=REPLACE_WITH_LI_AT_COOKIE" }
+  ],
+
+  "_comment_rotation_strategy": "'round-robin' (key1 > key2 > key3 > key1 ...) or 'sequential' (use one key until it is exhausted, then the next).",
+  "rotation_strategy": "round-robin",
+
+  "_comment_max_usage_per_key_usd": "Skip a key once its monthly Apify usage reaches this amount (free tier = $5/month). The account's own limit is used if lower.",
+  "max_usage_per_key_usd": 4.50,
+
+  "_comment_usage_safety_margin_usd": "Treat a key as over budget when usage >= max_usage_per_key_usd - this margin, so a final run can't push it over.",
+  "usage_safety_margin_usd": 0.25,
+
+  "_comment_batch_size": "Save the enriched Excel file and progress.json every N contacts.",
+  "batch_size": 10,
+
+  "_comment_delay_between_calls_seconds": "Pause after each actor run. Override on the command line with --delay.",
+  "delay_between_calls_seconds": 5,
+
+  "_comment_actor_timeout_seconds": "Give up on an actor run (and abort it) after this many seconds of polling.",
+  "actor_timeout_seconds": 120,
+
+  "_comment_poll_interval_seconds": "How often to poll a running actor for its status.",
+  "poll_interval_seconds": 5,
+
+  "_comment_accept_guessed_emails": "The LinkedIn actor may return pattern-guessed emails (email_source = 'guessed'). Set to false to keep only discovered emails.",
+  "accept_guessed_emails": true,
+
+  "_comment_actors": "Optional: override actor IDs if you switch to a different actor on the Apify Store.",
+  "actors": {
+    "linkedin_search": "get-leads/linkedin-scraper",
+    "company_primary": "foxlabs/owler-intelligence",
+    "company_fallback": "automation-lab/owler-company-intelligence-scraper",
+    "phone": "api-empire/linkedin-profile-phone-number-scraper"
+  },
+
+  "_comment_phone_actor_input": "Input sent to the phone actor. {profile_url} and {li_at} are filled in at runtime. Check the actor's Input tab on Apify and adjust the field names if they differ.",
+  "phone_actor_input": {
+    "profileUrls": ["{profile_url}"],
+    "cookie": "{li_at}"
+  }
+}
