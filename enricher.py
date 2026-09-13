@@ -44,6 +44,8 @@ DEFAULT_ACTORS = {
     "company_primary": "foxlabs/owler-intelligence",
     "company_fallback": "automation-lab/owler-company-intelligence-scraper",
     "company_maps": "compass/crawler-google-places",
+    "web_search": "apify/google-search-scraper",
+    "website_contacts": "vdrmota/contact-info-scraper",
     "phone": "api-empire/linkedin-profile-phone-number-scraper",
 }
 
@@ -95,6 +97,20 @@ COMPANY_STOPWORDS = {
     "holdings", "services", "solutions", "partners", "associates", "international",
 }
 NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "md", "phd", "cpa", "esq", "mba", "do", "rn", "dr", "mr", "ms", "mrs"}
+
+# Sites that mention companies but are never the company's own website.
+NON_COMPANY_DOMAINS = {
+    "linkedin.com", "facebook.com", "twitter.com", "x.com", "instagram.com", "youtube.com", "tiktok.com",
+    "wikipedia.org", "bloomberg.com", "crunchbase.com", "zoominfo.com", "rocketreach.co", "apollo.io",
+    "signalhire.com", "success.ai", "dnb.com", "owler.com", "glassdoor.com", "indeed.com", "yelp.com",
+    "bbb.org", "manta.com", "yellowpages.com", "mapquest.com", "prnewswire.com", "businesswire.com",
+    "globenewswire.com", "craft.co", "pitchbook.com", "cbinsights.com", "opencorporates.com",
+    "bizapedia.com", "techdogs.com", "crmmarketplace.com", "google.com", "amazon.com", "reddit.com",
+}
+GENERIC_EMAIL_PREFIXES = {
+    "info", "sales", "contact", "hello", "support", "admin", "office", "team", "help", "marketing",
+    "inquiries", "enquiries", "service", "careers", "jobs", "hr", "billing", "media", "press",
+}
 
 US_STATES = {
     "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR", "california": "CA",
@@ -191,6 +207,27 @@ def is_valid_email(value: object) -> bool:
         return False
     local, domain = value.split("@")
     return bool(local) and "." in domain and not domain.startswith(".") and not domain.endswith(".")
+
+
+def domain_of(url: object) -> str:
+    """Host of a URL without scheme, 'www.', port or path, e.g. 'https://www.acmg.md/x' -> 'acmg.md'."""
+    text = str(url or "").strip().lower()
+    if "://" in text:
+        text = text.split("://", 1)[1]
+    host = text.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0].split(":", 1)[0]
+    return host[4:] if host.startswith("www.") else host
+
+
+def decode_cf_email(encoded: str) -> str | None:
+    """Decode a Cloudflare-protected email ('/cdn-cgi/l/email-protection#<hex>'); None if invalid."""
+    try:
+        data = bytes.fromhex(encoded.strip())
+    except ValueError:
+        return None
+    if len(data) < 2:
+        return None
+    email = "".join(chr(byte ^ data[0]) for byte in data[1:])
+    return email.lower() if is_valid_email(email) else None
 
 
 def to_number(value: object) -> float | None:
@@ -937,7 +974,9 @@ class ResultParser:
             revenue = format_revenue(amount)
         elif not is_empty(best.get("revenueFormatted")):
             text = str(best["revenueFormatted"]).strip()
-            revenue = text if text.startswith("$") else f"${text}"
+            if text[0] in "<>" and "$" not in text:
+                text = f"{text[0]} ${text[1:].strip()}"  # Owler ranges: "< 1M" -> "< $1M"
+            revenue = text if "$" in text else f"${text}"
 
         employees = to_number(best.get("employees"))
         if employees is None:
@@ -958,6 +997,91 @@ class ResultParser:
             "employees": int(employees) if employees else None,
             "phone": normalize_phone(best.get("phoneNumber") or best.get("phone")),
         }
+
+    @staticmethod
+    def pick_website(pages: list[dict], company: str) -> str | None:
+        """
+        Choose the company's own website from Google search result pages.
+
+        The domain must contain the company's first significant word (e.g. 'accelergent' for
+        'Accelergent Growth Solutions') and must not be a social/news/directory site.
+        The highest-ranked qualifying result wins.
+        """
+        first = next((t for t in tokenize(company) if t not in COMPANY_STOPWORDS), "")
+        if len(first) < 3:
+            return None
+        results = [r for page in pages for r in (page.get("organicResults") or []) if isinstance(r, dict)]
+        results.sort(key=lambda r: r.get("position") or 99)
+        for result in results:
+            url = str(result.get("url") or "").strip()
+            domain = domain_of(url)
+            if not domain or any(domain == d or domain.endswith("." + d) for d in NON_COMPANY_DOMAINS):
+                continue
+            if first in domain.replace("-", "").replace(".", ""):
+                scheme = "http" if url.lower().startswith("http://") else "https"
+                host = url.split("://", 1)[-1].split("/", 1)[0]
+                return f"{scheme}://{host}/"
+        return None
+
+    @staticmethod
+    def parse_contacts(items: list[dict]) -> dict:
+        """
+        Merge contact-scraper items into {"emails", "phones", "linkedins"}.
+
+        Cloudflare-protected emails are decoded from scraped 'email-protection#' links.
+        Only confident US phone numbers are kept ('phonesUncertain' is often IP addresses).
+        """
+        emails: list[str] = []
+        phones: list[str] = []
+        linkedins: list[str] = []
+        for item in items:
+            candidates = [str(e) for e in (item.get("emails") or [])]
+            for url in item.get("scrapedUrls") or []:
+                if "email-protection#" in str(url):
+                    candidates.append(decode_cf_email(str(url).split("email-protection#", 1)[1]) or "")
+            for email in candidates:
+                email = email.strip().lower()
+                if is_valid_email(email) and email not in emails:
+                    emails.append(email)
+            for raw in item.get("phones") or []:
+                phone = normalize_phone(raw)
+                if phone and phone.startswith("(") and phone not in phones:
+                    phones.append(phone)
+            for url in item.get("linkedIns") or []:
+                if url not in linkedins:
+                    linkedins.append(url)
+        return {"emails": emails, "phones": phones, "linkedins": linkedins}
+
+    @staticmethod
+    def pick_email(emails: list[str], name: str, website: str, allow_generic: bool) -> tuple[str | None, str]:
+        """
+        Choose an email from the company website for this contact.
+
+        Only addresses on the website's domain count. An address containing the contact's
+        last name (or exactly their first name) is 'personal' and wins; a generic inbox
+        (info@, sales@ ...) is returned only when allow_generic is True.
+        Returns (email or None, kind) with kind 'personal', 'generic' or 'none'.
+        """
+        site = domain_of(website)
+        tokens = [t for t in tokenize(name) if t not in NAME_SUFFIXES]
+        first, last = (tokens[0], tokens[-1]) if len(tokens) >= 2 else ("", "")
+        generic = None
+        for raw in emails:
+            email = str(raw).strip().lower()
+            if not is_valid_email(email):
+                continue
+            local, domain = email.split("@")
+            if site and not (domain == site or domain.endswith("." + site) or site.endswith("." + domain)):
+                continue
+            letters = "".join(ch for ch in local if ch.isalpha())
+            if (last and len(last) >= 3 and last in letters) or (first and len(first) >= 3 and letters == first):
+                return email, "personal"
+            prefix = local.replace("-", ".").replace("_", ".").split(".")[0]
+            if prefix in GENERIC_EMAIL_PREFIXES and generic is None:
+                generic = email
+        if generic:
+            return (generic, "generic") if allow_generic else (None, "generic")
+        return None, "none"
 
     @staticmethod
     def strong_company_match(candidate: object, company: str) -> bool:
@@ -1123,6 +1247,8 @@ class Enricher:
             data["stats"].setdefault(stat, 0)
         data.setdefault("company_cache", {})
         data.setdefault("maps_cache", {})
+        data.setdefault("search_cache", {})
+        data.setdefault("web_cache", {})
         data.setdefault("failed_rows", [])
         return data
 
@@ -1140,6 +1266,8 @@ class Enricher:
             "stats": {stat: 0 for stat in STAT_KEYS},
             "company_cache": {},
             "maps_cache": {},
+            "search_cache": {},
+            "web_cache": {},
             "failed_rows": [],
         }
 
@@ -1297,6 +1425,27 @@ class Enricher:
             if company_data:
                 self._merge_company(row, company_data, filled)
                 company_phone = company_phone or company_data.get("phone")
+
+        # Step 2c - Google search for the company's own website when it is still unknown
+        if excel.is_blank(row, "website") and company and "web_search" not in self.disabled_actors:
+            found_site = self._find_website(company, prefix)
+            if found_site:
+                self._fill(row, "website", found_site, filled)
+
+        # Step 2d - Emails / phone published on the company website
+        website = excel.text(row, "website")
+        needs_contact = excel.is_blank(row, "email") or (phone_wanted and excel.is_blank(row, "phone"))
+        if website and needs_contact and "website_contacts" not in self.disabled_actors:
+            contacts = self._scrape_website(website, prefix)
+            if contacts:
+                allow_generic = bool(self.config.get("fill_generic_company_email", False))
+                site_email, kind = ResultParser.pick_email(contacts["emails"], name, website, allow_generic)
+                if site_email and self._fill(row, "email", site_email, filled):
+                    self.logger.info(f"   (email from company website, {kind})")
+                elif kind == "generic" and not allow_generic and excel.is_blank(row, "email"):
+                    self.logger.info(f"   Website only lists generic emails ({', '.join(contacts['emails'])}); "
+                                     "set fill_generic_company_email to use them", console=True)
+                company_phone = company_phone or (contacts["phones"][0] if contacts["phones"] else None)
 
         # Step 3 - Phone (needs LinkedIn URL + cookie-enabled key); company main line as fallback
         if phone_wanted and excel.is_blank(row, "phone"):
@@ -1493,6 +1642,64 @@ class Enricher:
         cache[cache_key] = place or {}
         return place
 
+    def _find_website(self, company: str, prefix: str) -> str | None:
+        """Google search for the company's own website; cached per company (also caches 'not found')."""
+        cache = self.progress["search_cache"]
+        cache_key = company_cache_key(company)
+        if cache_key in cache:
+            self._lookups_announced += 1
+            self.logger.info(f"{prefix} [cache] Web search: {company}", console=True)
+            return cache[cache_key] or None
+        payload = {
+            "queries": '"' + company.replace('"', "") + '"',
+            "maxPagesPerQuery": 1,
+            "countryCode": "us",
+            "languageCode": "en",
+            "mobileResults": False,
+            "aiOverview": {"scrapeFullAiOverview": False},
+            "maximumLeadsEnrichmentRecords": 0,
+        }
+        pages = self._run_step("web_search", self.actors["web_search"], payload, prefix, f"Web search: {company}")
+        if pages is None:
+            return None
+        website = ResultParser.pick_website(pages, company)
+        self.logger.info(f"   Web search: {'found ' + website if website else 'no company website in results'}")
+        cache[cache_key] = website or ""
+        return website
+
+    def _scrape_website(self, website: str, prefix: str) -> dict | None:
+        """Emails and phones from the website's home and contact pages; cached per domain."""
+        domain = domain_of(website)
+        if not domain:
+            return None
+        cache = self.progress["web_cache"]
+        if domain in cache:
+            self._lookups_announced += 1
+            self.logger.info(f"{prefix} [cache] Website contacts: {domain}", console=True)
+            return cache[domain] or None
+        scheme = "http" if website.lower().startswith("http://") else "https"
+        host = website.split("://", 1)[-1].split("/", 1)[0]
+        root = f"{scheme}://{host}"
+        payload = {
+            "startUrls": [{"url": f"{root}/"}, {"url": f"{root}/contact"}, {"url": f"{root}/contact-us"}],
+            "maxRequestsPerStartUrl": 5,
+            "maxDepth": 1,
+            "maxRequests": 15,
+            "sameDomain": True,
+            "mergeContacts": True,
+            "considerChildFrames": False,
+            "maximumLeadsEnrichmentRecords": 0,
+            "proxyConfig": {"useApifyProxy": True},
+        }
+        items = self._run_step("website_contacts", self.actors["website_contacts"], payload, prefix,
+                               f"Website contacts: {domain}")
+        if items is None:
+            return None
+        contacts = ResultParser.parse_contacts(items)
+        self.logger.info(f"   Website contacts: emails={contacts['emails']} phones={contacts['phones']}")
+        cache[domain] = contacts if (contacts["emails"] or contacts["phones"]) else {}
+        return cache[domain] or None
+
     def _find_phone(self, linkedin_url: str, label: str, prefix: str) -> str | None:
         """Actor 3: phone number from a LinkedIn profile, using a cookie-enabled key."""
         if self.key_manager.available_count(require_cookie=True) == 0:
@@ -1657,6 +1864,10 @@ class Enricher:
                     companies.add(key)
                     plan.append("google-maps + owler")
                     company_lookups += 1
+            if "website" in missing:
+                plan.append("web-search (if still no website)")
+            if "email" in missing or phone_wanted:
+                plan.append("website-contacts")
             if phone_wanted and name:
                 plan.append("phone (if LinkedIn URL found)")
                 phone_lookups += 1

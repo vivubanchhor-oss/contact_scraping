@@ -32,6 +32,9 @@
   "_comment_accept_guessed_emails": "The LinkedIn actor may return pattern-guessed emails (email_source = 'guessed'). Set to false to keep only discovered emails.",
   "accept_guessed_emails": true,
 
+  "_comment_fill_generic_company_email": "When the company website only lists generic inboxes (info@, sales@ ...), put that address in the Email column. Off by default because the column is for the person's own email.",
+  "fill_generic_company_email": false,
+
   "_comment_linkedin_search_use_cookie": "Send the key's LinkedIn cookie to the LinkedIn search actor (much better matches than cookie-less search). Searches run on cookie-enabled keys first and fall back to cookie-less searches when those run out. Set to false to keep your LinkedIn account out of searching.",
   "linkedin_search_use_cookie": true,
 
@@ -47,6 +50,8 @@
     "company_primary": "foxlabs/owler-intelligence",
     "company_fallback": "automation-lab/owler-company-intelligence-scraper",
     "company_maps": "compass/crawler-google-places",
+    "web_search": "apify/google-search-scraper",
+    "website_contacts": "vdrmota/contact-info-scraper",
     "phone": "api-empire/linkedin-profile-phone-number-scraper"
   },
 

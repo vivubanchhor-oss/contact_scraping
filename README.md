@@ -11,6 +11,8 @@
 | 1 | `get-leads/linkedin-scraper` (uses your LinkedIn cookie when set) | Email, LinkedIn profile URL |
 | 2a | `compass/crawler-google-places` (Google Maps, searched by company + city) | Website, phone, street, zip |
 | 2b | `foxlabs/owler-intelligence` (fallback `automation-lab/owler-company-intelligence-scraper`) | Revenue, employees, and anything Google Maps missed |
+| 2c | `apify/google-search-scraper` (only when the website is still unknown) | Website |
+| 2d | `vdrmota/contact-info-scraper` (company home + contact pages) | Email (if it matches the person's name), business phone |
 | 3 | `api-empire/linkedin-profile-phone-number-scraper` | Business phone from the LinkedIn profile (needs a LinkedIn cookie) |
 
 ---
@@ -206,7 +208,9 @@ Exit codes: `0` done · `1` config/input error · `2` all keys exhausted · `130
 - Owler results must share at least one significant word with the company name.
 - A Google Maps place must match the company name closely (all significant words for 1–2 word names, about two thirds for longer names) and be in the contact's state.
 - The Owler street address and zip are used only when the headquarters city matches the contact's city.
-- If no personal phone is found, the company's main phone number from Google Maps (or Owler) is used.
+- If no personal phone is found, the company's main phone number from Google Maps, Owler or the company website is used.
+- A website found by web search must contain the company's first significant word in its domain (e.g. `accelergent.com` for "Accelergent Growth Solutions"). Social, news and directory sites are skipped.
+- Emails from a company website are used only if they're on that website's domain and contain the person's name. Generic inboxes (`info@`, `sales@` …) are skipped unless you set `"fill_generic_company_email": true` in `keys.json`. Emails hidden by Cloudflare are decoded automatically.
 
 ## Troubleshooting
 
@@ -226,5 +230,7 @@ Exit codes: `0` done · `1` config/input error · `2` all keys exhausted · `130
 - `foxlabs/owler-intelligence` accepts only Owler URLs, so the script guesses the URL from the company name. When the guess is wrong, the fallback actor looks the company up by name.
 - The phone actor's input format couldn't be checked because its Store page wasn't publicly reachable. Adjust `phone_actor_input` in `keys.json` if needed.
 - Apify costs can't be predicted exactly. Start with `--test` and watch `--status`.
+- In testing (Sep 2026), `get-leads/linkedin-scraper` returned 0 profiles for every search, even "Satya Nadella" with a valid cookie. Until that's fixed, emails mostly come from company websites. You can swap the actor ID in `keys.json`.
+- The sheet can be out of date: people change jobs, so a company's contact details may no longer reach that person.
 - Owler has few very small companies, so revenue and employee counts will often stay empty. Google Maps covers most local businesses for website, phone and address.
 - The LinkedIn actor routes requests through a Malaysian proxy by default, and LinkedIn may block a cookie used from a different country. Set `"linkedin_proxy_country"` in `keys.json` to the country your cookie comes from (e.g. `"IN"`, `"US"`). If searches start failing, copy a fresh cookie.
