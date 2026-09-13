@@ -1013,7 +1013,7 @@ class Enricher:
         """Load and validate keys.json; raises ValueError/OSError with a clear message."""
         path = self.paths["keys"]
         if not os.path.isfile(path):
-            raise ValueError(f"Keys file not found: {path} (copy the keys.json template and add your tokens)")
+            raise ValueError(f"Keys file not found: {path} (run: cp keys.example.json keys.json, then add your tokens)")
         try:
             config = load_json_file(path)
         except json.JSONDecodeError as exc:
