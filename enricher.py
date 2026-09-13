@@ -1021,15 +1021,21 @@ class Enricher:
         keys = config.get("apify_keys")
         if not isinstance(keys, list) or not keys:
             raise ValueError(f"{path}: 'apify_keys' must be a non-empty list")
+        usable = []
         for index, entry in enumerate(keys, start=1):
             token = str(entry.get("token", "")).strip()
             label = entry.get("label") or f"#{index}"
             if not token or "xxx" in token.lower() or "replace" in token.lower():
-                raise ValueError(f"{path}: key {label} has a missing or placeholder token")
+                self.logger.warn(f"⚠ Key {label} has a missing or placeholder token - skipping it.")
+                continue
             cookie = entry.get("linkedin_cookie")
             if cookie and ("replace" in str(cookie).lower() or "xxx" in str(cookie).lower()):
                 self.logger.warn(f"⚠ Key {label}: linkedin_cookie looks like a placeholder - ignoring it.")
                 entry["linkedin_cookie"] = None
+            usable.append(entry)
+        if not usable:
+            raise ValueError(f"{path}: no usable keys - every token is missing or a placeholder")
+        config["apify_keys"] = usable
         if int(config.get("batch_size", 10)) < 1:
             raise ValueError(f"{path}: batch_size must be >= 1")
         if float(config.get("delay_between_calls_seconds", 5)) < 0:
