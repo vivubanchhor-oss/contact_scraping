@@ -7,6 +7,7 @@ progress.json.tmp
 enriched_*.xlsx
 *.tmp.xlsx
 enrichment_log_*.txt
+*.txt
 
 # Python / OS
 __pycache__/

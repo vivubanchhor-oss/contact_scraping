@@ -8,9 +8,10 @@
 
 | Step | Apify actor | Fills |
 |---|---|---|
-| 1 | `get-leads/linkedin-scraper` | Email, LinkedIn profile URL |
-| 2 | `foxlabs/owler-intelligence` (fallback `automation-lab/owler-company-intelligence-scraper`) | Website, street, zip, city/state, revenue, employees |
-| 3 | `api-empire/linkedin-profile-phone-number-scraper` | Business phone (needs a LinkedIn cookie) |
+| 1 | `get-leads/linkedin-scraper` (uses your LinkedIn cookie when set) | Email, LinkedIn profile URL |
+| 2a | `compass/crawler-google-places` (Google Maps, searched by company + city) | Website, phone, street, zip |
+| 2b | `foxlabs/owler-intelligence` (fallback `automation-lab/owler-company-intelligence-scraper`) | Revenue, employees, and anything Google Maps missed |
+| 3 | `api-empire/linkedin-profile-phone-number-scraper` | Business phone from the LinkedIn profile (needs a LinkedIn cookie) |
 
 ---
 
@@ -66,7 +67,7 @@ Open `keys.json` and replace the placeholders in the `apify_keys` list. Use one 
 |---|---|
 | `token` | The Apify API token from step 2 |
 | `label` | Any unique name. It's shown in the console and logs so you can tell accounts apart |
-| `linkedin_cookie` | Your LinkedIn `li_at` cookie (see step 4), or `null`. Only needed for phone numbers |
+| `linkedin_cookie` | Your LinkedIn `li_at` cookie (see step 4), or `null`. Recommended: it gives much better LinkedIn matches and enables phone lookups |
 
 - Add or remove entries to match how many accounts you have.
 - Put commas between entries, but **not** after the last one.
@@ -84,9 +85,13 @@ Then check that the keys work. This shows each key's current Apify usage and use
 python enricher.py "vivek afi.xlsx" --status
 ```
 
-## 4. (Optional) Get your LinkedIn `li_at` cookie
+## 4. (Recommended) Get your LinkedIn `li_at` cookie
 
-The cookie is only needed to find **phone numbers**. Without it you still get emails, websites, addresses, revenue and employee counts. Leave `linkedin_cookie` as `null` to skip phones.
+The cookie is used in two places:
+- **LinkedIn search (step 1).** With a cookie, the actor uses LinkedIn's own search and finds the right person far more often. Without one it falls back to search-engine results, which are shallow and often return the wrong people.
+- **Phone numbers (step 3).** Phone lookups only run on keys that have a cookie.
+
+Without any cookie you still get Google Maps and Owler data, but LinkedIn emails will be rare. To keep your LinkedIn account out of the search step, set `"linkedin_search_use_cookie": false` in `keys.json`.
 
 > ⚠ **Use a secondary LinkedIn account, not your main one.** Scraping with your cookie is against LinkedIn's terms, and heavy use can get the account restricted. Treat the cookie like a password: anyone who has it is logged in as you.
 
@@ -184,12 +189,12 @@ All of these are written next to the input spreadsheet:
 - Before each actor run, the key's monthly usage is checked. Keys near `max_usage_per_key_usd` are skipped.
 - A rate limit (429) or quota error marks the key **exhausted** and the next key is used. It is retried after 24 hours.
 - An auth error (401/403) marks the key **dead** for the rest of the session.
-- Phone lookups only use keys that have a `linkedin_cookie`.
+- Phone lookups only use keys that have a `linkedin_cookie`. LinkedIn searches use those keys first too, and switch to cookie-less searches when they run out.
 
 ## Error handling
 
 - Network errors and server errors are retried 3 times (after 2s, 4s, 8s).
-- An actor run longer than 120s is aborted, and that step is skipped for the contact.
+- An actor run longer than `actor_timeout_seconds` (default 300s) is aborted, and that step is skipped for the contact. LinkedIn searches normally take about 2 minutes, so don't set this below 180.
 - If an actor rejects its input, that step is turned off for the rest of the run, with a message telling you to check `keys.json`.
 - A failure on one contact is logged and the run continues.
 
@@ -198,9 +203,10 @@ Exit codes: `0` done · `1` config/input error · `2` all keys exhausted · `130
 ## Data-quality safeguards
 
 - A LinkedIn result is used only if the first and last name match, plus the company or the city. An email is used only when the company matches.
-- Company results must share at least one significant word with the company name.
+- Owler results must share at least one significant word with the company name.
+- A Google Maps place must match the company name closely (all significant words for 1–2 word names, about two thirds for longer names) and be in the contact's state.
 - The Owler street address and zip are used only when the headquarters city matches the contact's city.
-- If no personal phone is found, the company's main phone number from Owler is used.
+- If no personal phone is found, the company's main phone number from Google Maps (or Owler) is used.
 
 ## Troubleshooting
 
@@ -220,3 +226,5 @@ Exit codes: `0` done · `1` config/input error · `2` all keys exhausted · `130
 - `foxlabs/owler-intelligence` accepts only Owler URLs, so the script guesses the URL from the company name. When the guess is wrong, the fallback actor looks the company up by name.
 - The phone actor's input format couldn't be checked because its Store page wasn't publicly reachable. Adjust `phone_actor_input` in `keys.json` if needed.
 - Apify costs can't be predicted exactly. Start with `--test` and watch `--status`.
+- Owler has few very small companies, so revenue and employee counts will often stay empty. Google Maps covers most local businesses for website, phone and address.
+- The LinkedIn actor routes requests through a Malaysian proxy by default, and LinkedIn may block a cookie used from a different country. Set `"linkedin_proxy_country"` in `keys.json` to the country your cookie comes from (e.g. `"IN"`, `"US"`). If searches start failing, copy a fresh cookie.

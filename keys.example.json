@@ -24,7 +24,7 @@
   "delay_between_calls_seconds": 5,
 
   "_comment_actor_timeout_seconds": "Give up on an actor run (and abort it) after this many seconds of polling.",
-  "actor_timeout_seconds": 120,
+  "actor_timeout_seconds": 300,
 
   "_comment_poll_interval_seconds": "How often to poll a running actor for its status.",
   "poll_interval_seconds": 5,
@@ -32,11 +32,21 @@
   "_comment_accept_guessed_emails": "The LinkedIn actor may return pattern-guessed emails (email_source = 'guessed'). Set to false to keep only discovered emails.",
   "accept_guessed_emails": true,
 
+  "_comment_linkedin_search_use_cookie": "Send the key's LinkedIn cookie to the LinkedIn search actor (much better matches than cookie-less search). Searches run on cookie-enabled keys first and fall back to cookie-less searches when those run out. Set to false to keep your LinkedIn account out of searching.",
+  "linkedin_search_use_cookie": true,
+
+  "_comment_linkedin_proxy_country": "Country your LinkedIn cookie comes from, as a 2-letter code (e.g. \"IN\", \"US\", \"GB\"). The LinkedIn actor uses a Malaysian proxy by default, and LinkedIn may block a cookie used from a different country. Use null for the actor default.",
+  "linkedin_proxy_country": null,
+
+  "_comment_linkedin_max_results": "Profiles returned per LinkedIn name search (1-25). The actor charges about $0.004 per profile; the right person is picked by company/city afterwards. Raise it for very common names, lower it to save credits.",
+  "linkedin_max_results": 5,
+
   "_comment_actors": "Optional: override actor IDs if you switch to a different actor on the Apify Store.",
   "actors": {
     "linkedin_search": "get-leads/linkedin-scraper",
     "company_primary": "foxlabs/owler-intelligence",
     "company_fallback": "automation-lab/owler-company-intelligence-scraper",
+    "company_maps": "compass/crawler-google-places",
     "phone": "api-empire/linkedin-profile-phone-number-scraper"
   },
 

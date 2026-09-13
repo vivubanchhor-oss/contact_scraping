@@ -43,6 +43,7 @@ DEFAULT_ACTORS = {
     "linkedin_search": "get-leads/linkedin-scraper",
     "company_primary": "foxlabs/owler-intelligence",
     "company_fallback": "automation-lab/owler-company-intelligence-scraper",
+    "company_maps": "compass/crawler-google-places",
     "phone": "api-empire/linkedin-profile-phone-number-scraper",
 }
 
@@ -733,7 +734,11 @@ class ApifyClient:
         if status != "SUCCEEDED":
             if not items:
                 raise ActorRunFailedError(f"{actor_id} run {run_id} ended with status {status}")
-            self.logger.warn(f"   run ended {status} but returned {len(items)} item(s); using them", console=False)
+            errors = [str(item["error"]) for item in items if item.get("error")]
+            if len(errors) == len(items):
+                self.logger.debug(f"   run ended {status}; actor reported: {truncate('; '.join(errors), 300)}")
+            else:
+                self.logger.warn(f"   run ended {status} but returned {len(items)} item(s); using them", console=False)
         return items
 
     def _abort_run(self, run_id: str, key: ApiKey) -> None:
@@ -855,20 +860,26 @@ class ResultParser:
         """
         Choose the best LinkedIn search result for a contact.
 
-        Requires a first+last name match plus either a company or a city match.
-        Returns {"linkedin_url", "email", "email_source", "company_match"} or None.
+        Requires a first+last name match plus a company match (current or past job) or a city match.
+        company_match is True only for the CURRENT employer, so emails from a different
+        employer are never used. Returns {"linkedin_url", "email", "email_source", "company_match"} or None.
         """
         best, best_score = None, -1
         for item in items:
             if item.get("error") or not ResultParser.name_matches(item.get("name"), name):
                 continue
-            employer_text = " ".join(str(item.get(k) or "") for k in ("current_company", "headline", "current_title"))
-            company_match = ResultParser.company_overlap(employer_text, company) > 0 or not company_tokens(company)
+            no_tokens = not company_tokens(company)
+            current_text = " ".join(str(item.get(k) or "") for k in ("current_company", "headline", "current_title"))
+            company_match = no_tokens or ResultParser.company_overlap(current_text, company) > 0
+            jobs = item.get("experience") if isinstance(item.get("experience"), list) else []
+            past_text = " ".join(str(job.get("company") or "") for job in jobs if isinstance(job, dict))
+            past_match = not company_match and ResultParser.company_overlap(past_text, company) > 0
             location_text = str(item.get("location") or "")
             city_match = bool(city) and set(tokenize(city)) <= set(tokenize(location_text))
-            if not (company_match or city_match):
+            if not (company_match or past_match or city_match):
                 continue
-            score = (2 if company_match else 0) + (1 if city_match else 0) + (1 if item.get("email") else 0)
+            score = ((3 if company_match else 0) + (1 if past_match else 0) + (1 if city_match else 0)
+                     + (1 if item.get("email") else 0))
             if score > best_score:
                 best_score = score
                 best = {"item": item, "company_match": company_match}
@@ -946,6 +957,59 @@ class ResultParser:
             "revenue": revenue,
             "employees": int(employees) if employees else None,
             "phone": normalize_phone(best.get("phoneNumber") or best.get("phone")),
+        }
+
+    @staticmethod
+    def strong_company_match(candidate: object, company: str) -> bool:
+        """
+        Stricter name check for place search: 1-2 significant words must all match,
+        longer names need about two thirds (so 'Capital One' never matches 'Aegle Capital').
+        """
+        wanted = company_tokens(company)
+        if not wanted:
+            return True
+        overlap = ResultParser.company_overlap(candidate, company)
+        required = len(wanted) if len(wanted) <= 2 else (len(wanted) * 2 + 2) // 3
+        return overlap >= required
+
+    @staticmethod
+    def parse_place(items: list[dict], company: str, city: str, state: str) -> dict | None:
+        """
+        Pick the Google Maps place for a company: strong name match, same state, same city preferred.
+
+        Returns website/street/city/state/zip/phone (values may be None) or None.
+        """
+        wanted_state = state_abbrev(state)
+        best, best_score = None, -1
+        for item in items:
+            if item.get("error") or not item.get("title"):
+                continue
+            if not ResultParser.strong_company_match(item["title"], company):
+                continue
+            place_state = state_abbrev(item.get("state"))
+            if wanted_state and place_state and place_state != wanted_state:
+                continue
+            score = ResultParser.company_overlap(item["title"], company) * 2
+            if city and tokenize(item.get("city")) == tokenize(city):
+                score += 1
+            if score > best_score:
+                best, best_score = item, score
+        if best is None:
+            return None
+
+        def clean(value: object) -> str | None:
+            return str(value).strip() if not is_empty(value) else None
+
+        return {
+            "name": best.get("title"),
+            "website": clean(best.get("website")),
+            "street": clean(best.get("street")),
+            "city": clean(best.get("city")),
+            "state": state_abbrev(best.get("state")),
+            "zip": clean(best.get("postalCode")),
+            "revenue": None,
+            "employees": None,
+            "phone": normalize_phone(best.get("phoneUnformatted") or best.get("phone")),
         }
 
     @staticmethod
@@ -1058,6 +1122,7 @@ class Enricher:
         for stat in STAT_KEYS:
             data["stats"].setdefault(stat, 0)
         data.setdefault("company_cache", {})
+        data.setdefault("maps_cache", {})
         data.setdefault("failed_rows", [])
         return data
 
@@ -1074,6 +1139,7 @@ class Enricher:
             "total_incomplete": total,
             "stats": {stat: 0 for stat in STAT_KEYS},
             "company_cache": {},
+            "maps_cache": {},
             "failed_rows": [],
         }
 
@@ -1124,7 +1190,7 @@ class Enricher:
         self.key_manager = KeyManager(self.config, self.logger, key_state)
         self.client = ApifyClient(
             self.key_manager, self.logger,
-            actor_timeout=int(self.config.get("actor_timeout_seconds", 120)),
+            actor_timeout=int(self.config.get("actor_timeout_seconds", 300)),
             poll_interval=int(self.config.get("poll_interval_seconds", 5)),
         )
         self.delay = float(self.args.delay if self.args.delay is not None
@@ -1202,7 +1268,7 @@ class Enricher:
         if not name:
             self.logger.info(f"{prefix} Row {row} has no name - skipping LinkedIn search", console=True)
         elif "linkedin_search" not in self.disabled_actors and ("email" in missing or wants_url):
-            person = self._search_person(name, company, city, prefix)
+            person = self._search_person(name, company, city, excel.text(row, "state"), prefix)
             if person:
                 linkedin_url = person["linkedin_url"]
                 if linkedin_url:
@@ -1216,21 +1282,30 @@ class Enricher:
                     self.logger.info(f"   Email {email} ignored (source={person['email_source']}, "
                                      f"company match={person['company_match']})")
 
-        # Step 2 - Company data (cached per company)
-        company_data = None
-        if any(field in missing for field in COMPANY_FIELDS):
+        # Step 2a - Google Maps (website / phone / address), cached per company + location
+        company_phone = None
+        maps_fields = ["website", "street", "city", "state", "zip"] + (["phone"] if phone_wanted else [])
+        if "company_maps" not in self.disabled_actors and any(field in missing for field in maps_fields):
+            place = self._lookup_maps(company, city, excel.text(row, "state"), prefix)
+            if place:
+                self._merge_company(row, place, filled)
+                company_phone = place.get("phone")
+
+        # Step 2b - Owler (revenue / employees / anything Maps missed), cached per company
+        if any(excel.is_blank(row, field) for field in COMPANY_FIELDS):
             company_data = self._lookup_company(company, prefix)
             if company_data:
                 self._merge_company(row, company_data, filled)
+                company_phone = company_phone or company_data.get("phone")
 
-        # Step 3 - Phone (needs LinkedIn URL + cookie-enabled key)
+        # Step 3 - Phone (needs LinkedIn URL + cookie-enabled key); company main line as fallback
         if phone_wanted and excel.is_blank(row, "phone"):
             if linkedin_url and "phone" not in self.disabled_actors:
                 phone = self._find_phone(linkedin_url, label, prefix)
                 if phone:
                     self._fill(row, "phone", phone, filled)
-            if excel.is_blank(row, "phone") and company_data and company_data.get("phone"):
-                if self._fill(row, "phone", company_data["phone"], filled):
+            if excel.is_blank(row, "phone") and company_phone:
+                if self._fill(row, "phone", company_phone, filled):
                     self.logger.info("   (phone taken from company main line)")
 
         if filled:
@@ -1280,16 +1355,54 @@ class Enricher:
                 time.sleep(self.delay)
         return None
 
-    def _search_person(self, name: str, company: str, city: str, prefix: str) -> dict | None:
-        """Actor 1: search LinkedIn for 'Name Company' and pick the matching profile."""
-        payload = {
+    def _search_person(self, name: str, company: str, city: str, state: str, prefix: str) -> dict | None:
+        """
+        Actor 1: search LinkedIn by the person's name (narrowed by state) and pick the matching profile.
+
+        The actor's search_profiles mode treats searchQuery as a person's name, so the company
+        is not part of the query; it is checked afterwards by ResultParser.pick_person.
+        With linkedin_search_use_cookie on (default) and a cookie-enabled key available, that
+        key's li_at cookie is sent so the actor uses LinkedIn's structured search instead of
+        shallow search-engine results. Falls back to a cookie-less search when none remain.
+        """
+        max_results = max(1, min(25, int(self.config.get("linkedin_max_results", 5))))
+        base_input = {
             "mode": "search_profiles",
-            "searchQuery": f"{name} {company}",
-            "maxResults": 5,
+            "searchQuery": name,
+            "maxResults": max_results,
             "discoverEmails": True,
         }
-        items = self._run_step("linkedin_search", self.actors["linkedin_search"], payload, prefix,
-                               f"Searching: {name} @ {company}", max_items=5)
+        state_code = state_abbrev(state)
+        state_names = {code: full.title() for full, code in US_STATES.items()}
+        if state_code in state_names:
+            base_input["location"] = f"{state_names[state_code]}, United States"
+        elif city or state:
+            base_input["location"] = ", ".join(part for part in (city, state) if part)
+        # Match the actor's proxy to the cookie's country; LinkedIn may block mismatched sessions.
+        proxy_country = str(self.config.get("linkedin_proxy_country") or "").strip().upper()
+        if proxy_country:
+            base_input["proxyCountry"] = proxy_country
+        use_cookie = (bool(self.config.get("linkedin_search_use_cookie", True))
+                      and self.key_manager.available_count(require_cookie=True) > 0)
+
+        def build_input(key: ApiKey) -> dict:
+            payload = dict(base_input)
+            if use_cookie and key.li_at:
+                payload["loginCookies"] = key.li_at  # actor input field; expects the bare li_at value
+            return payload
+
+        action = f"Searching: {name} @ {company}"
+        try:
+            items = self._run_step("linkedin_search", self.actors["linkedin_search"], build_input, prefix,
+                                   action + (" (with LinkedIn cookie)" if use_cookie else ""),
+                                   max_items=max_results, require_cookie=use_cookie)
+        except NoKeysAvailableError:
+            if not use_cookie or self.key_manager.all_exhausted():
+                raise
+            self.logger.warn("⚠ Cookie-enabled keys exhausted - searching LinkedIn without a cookie.")
+            use_cookie = False
+            items = self._run_step("linkedin_search", self.actors["linkedin_search"], build_input, prefix,
+                                   action, max_items=max_results)
         if items is None:
             return None
         if not items:
@@ -1342,6 +1455,43 @@ class Enricher:
         if data or not had_error:
             cache[cache_key] = data or {}
         return data
+
+    def _lookup_maps(self, company: str, city: str, state: str, prefix: str) -> dict | None:
+        """Google Maps search for the company near the contact's city; cached per company + location."""
+        cache = self.progress["maps_cache"]
+        cache_key = "|".join((company_cache_key(company), company_cache_key(city), company_cache_key(state)))
+        if cache_key in cache:
+            self._lookups_announced += 1
+            self.logger.info(f"{prefix} [cache] Google Maps: {company}", console=True)
+            return cache[cache_key] or None
+
+        location = ", ".join(part for part in (city, state) if part)
+        is_us = not state or state_abbrev(state) in US_STATES.values()
+        payload = {
+            "searchStringsArray": [company],
+            # Only pin the country for US states (the sheet also has e.g. "London, England").
+            "locationQuery": (f"{location}, USA" if is_us else location) if location else "USA",
+            "maxCrawledPlacesPerSearch": 3,
+            "language": "en",
+            # Turn off paid extras - only basic place data is needed.
+            "scrapePlaceDetailPage": False,
+            "maxReviews": 0,
+            "maxImages": 0,
+            "maximumLeadsEnrichmentRecords": 0,
+            "scrapeContacts": False,
+            "includeWebResults": False,
+        }
+        items = self._run_step("company_maps", self.actors["company_maps"], payload, prefix,
+                               f"Google Maps: {company} ({location or 'USA'})", max_items=3)
+        if items is None:
+            return None
+        place = ResultParser.parse_place(items, company, city, state)
+        if place:
+            self.logger.info(f"   Maps match: {place.get('name')} | {json.dumps(place, default=str)}")
+        else:
+            self.logger.info(f"   Google Maps: {len(items)} place(s), none matched {company}")
+        cache[cache_key] = place or {}
+        return place
 
     def _find_phone(self, linkedin_url: str, label: str, prefix: str) -> str | None:
         """Actor 3: phone number from a LinkedIn profile, using a cookie-enabled key."""
@@ -1502,10 +1652,10 @@ class Enricher:
             if any(f in missing for f in COMPANY_FIELDS):
                 key = company_cache_key(company)
                 if key in companies:
-                    plan.append("company (cached)")
+                    plan.append("google-maps + owler (cached)")
                 else:
                     companies.add(key)
-                    plan.append("company")
+                    plan.append("google-maps + owler")
                     company_lookups += 1
             if phone_wanted and name:
                 plan.append("phone (if LinkedIn URL found)")
@@ -1517,7 +1667,8 @@ class Enricher:
 
         print("\nEstimated actor runs (maximum):")
         print(f"  LinkedIn searches: {searches}")
-        print(f"  Company lookups:   {company_lookups} unique companies (up to 2 runs each with fallback)")
+        print(f"  Company lookups:   {company_lookups} unique companies "
+              "(1 Google Maps run + up to 2 Owler runs each)")
         print(f"  Phone lookups:     {phone_lookups if phones else 0}"
               + ("" if phones else "  (disabled: --skip-phones or no cookie keys)"))
         print(f"\nKeys: {key_note}")
