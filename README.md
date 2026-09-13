@@ -164,6 +164,7 @@ Press **Ctrl+C** to stop safely. Progress is saved, and the contact that was int
 | `python enricher.py input.xlsx` | Full run over all incomplete contacts |
 | `--dry-run` | Show the plan. No API calls |
 | `--test N` | Process only the next N incomplete contacts |
+| `--rows 31-35` | Process only these Excel rows (also `A31-A35` or `31,33,40-42`). Keeps existing enriched data and doesn't change the `--resume` position |
 | `--resume` | Continue from `progress.json` |
 | `--restart` | Throw away previous progress and start over (overwrites the enriched file) |
 | `--status` | Show progress plus live usage for each key |

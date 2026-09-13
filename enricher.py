@@ -1192,6 +1192,7 @@ class Enricher:
         self.phones_enabled = not args.skip_phones
         self.phone_skip_logged = False
         self._lookups_announced = 0  # lookups started for the current contact (console bookkeeping)
+        self.session_processed = 0  # contacts processed in this invocation
         self.delay = 5.0
         self.batch_size = 10
 
@@ -1288,7 +1289,9 @@ class Enricher:
 
         saved = self.load_progress()
         resume = self.args.resume
-        if not resume and saved and int(saved.get("last_processed_row", 0)) > 0 and not self.args.restart:
+        targeted = bool(self.args.rows)  # --rows: enrich specific rows on top of existing results
+        if (not resume and not targeted and saved and int(saved.get("last_processed_row", 0)) > 0
+                and not self.args.restart):
             self.logger.error(
                 f"✖ {self.paths['progress']} shows an earlier run (last row {saved['last_processed_row']}).\n"
                 "  Use --resume to continue it, or --restart to start over (overwrites the enriched file).")
@@ -1299,16 +1302,17 @@ class Enricher:
         if resume and saved.get("input_file") not in (None, os.path.basename(self.paths["input"])):
             self.logger.warn(f"⚠ progress.json was created for '{saved.get('input_file')}', not this file.")
 
-        source = self.paths["output"] if resume and os.path.isfile(self.paths["output"]) else self.paths["input"]
+        keep_existing = resume or (targeted and not self.args.restart)
+        source = self.paths["output"] if keep_existing and os.path.isfile(self.paths["output"]) else self.paths["input"]
         try:
             self.excel = ExcelHandler(source, self.logger)
         except (OSError, ValueError) as exc:
             self.logger.error(f"✖ Could not open {source}: {exc}")
             return 1
 
-        if resume:
+        if keep_existing and saved:
             self.progress = saved
-            start_after = int(saved.get("last_processed_row", 0))
+            start_after = int(saved.get("last_processed_row", 0)) if resume else 0
             key_state = saved
         else:
             self.progress = self.new_progress(len(self.excel.incomplete_rows()))
@@ -1330,9 +1334,15 @@ class Enricher:
             self.phone_skip_logged = True
 
         pending = [row for row in self.excel.incomplete_rows() if row > start_after]
+        if targeted:
+            skipped = sorted(row for row in self.args.rows if row not in pending)
+            pending = [row for row in pending if row in self.args.rows]
+            if skipped:
+                self.logger.warn(f"⚠ Row(s) {', '.join(map(str, skipped))} have nothing to enrich "
+                                 "(already complete, blank, or no company) - skipping.")
         if self.args.test:
             pending = pending[: self.args.test]
-        total = int(self.progress.get("total_incomplete") or len(pending))
+        total = len(pending) if targeted else int(self.progress.get("total_incomplete") or len(pending))
 
         self.logger.info(
             f"Source: {os.path.basename(source)} | to process now: {len(pending)} | "
@@ -1351,8 +1361,8 @@ class Enricher:
 
         since_checkpoint = 0
         try:
-            for row in pending:
-                number = self.stats["total_processed"] + 1
+            for index, row in enumerate(pending, start=1):
+                number = index if targeted else self.stats["total_processed"] + 1
                 try:
                     self.process_contact(row, number, total)
                 except NoKeysAvailableError:
@@ -1361,8 +1371,10 @@ class Enricher:
                     self.stats["contacts_failed"] += 1
                     self.progress["failed_rows"].append({"row": row, "error": repr(exc), "at": now_iso()})
                     self.logger.error(f"   ✖ Row {row} failed: {exc!r} - continuing")
-                self.progress["last_processed_row"] = row
+                if not targeted:  # --rows runs must not move the --resume position
+                    self.progress["last_processed_row"] = row
                 self.stats["total_processed"] += 1
+                self.session_processed += 1
                 since_checkpoint += 1
                 if since_checkpoint >= self.batch_size:
                     self.checkpoint()
@@ -1801,7 +1813,7 @@ class Enricher:
         lines = [
             "",
             "═══ ENRICHMENT SUMMARY ═══",
-            f"Contacts processed: {s['total_processed']} / {total}",
+            f"Contacts processed: {self.session_processed if self.args.rows else s['total_processed']} / {total}",
             f"Contacts enriched:  {s['rows_enriched']}",
             f"Emails found:       {s['emails_found']}",
             f"Phones found:       {s['phones_found']}",
@@ -1833,6 +1845,8 @@ class Enricher:
             return 1
         start_after = int(saved.get("last_processed_row", 0)) if saved else 0
         rows = [row for row in excel.incomplete_rows() if row > start_after]
+        if self.args.rows:
+            rows = [row for row in rows if row in self.args.rows]
         if self.args.test:
             rows = rows[: self.args.test]
 
@@ -1945,6 +1959,24 @@ class Enricher:
 # CLI
 # ════════════════════════════════════════════════════════════════════════════
 
+def parse_row_spec(spec: str) -> set[int]:
+    """Parse an Excel row selection like '31-35', 'A31-A35' or '31,33,40-42' into row numbers (>= 2)."""
+    rows: set[int] = set()
+    for part in str(spec).replace(" ", "").split(","):
+        if not part:
+            continue
+        bounds = [bound.lstrip("aA") for bound in part.split("-")]
+        if len(bounds) > 2 or not all(bound.isdigit() for bound in bounds):
+            raise ValueError(f"invalid --rows value '{part}' (use e.g. 31-35 or 31,33,40-42)")
+        start, end = sorted((int(bounds[0]), int(bounds[-1])))
+        if start < 2:
+            raise ValueError("--rows must start at 2 or later (row 1 is the header)")
+        rows.update(range(start, end + 1))
+    if not rows:
+        raise ValueError("--rows is empty")
+    return rows
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     """Define the command-line interface."""
     parser = argparse.ArgumentParser(
@@ -1952,6 +1984,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("input", help="Input .xlsx file")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be enriched; no API calls")
     parser.add_argument("--test", type=int, metavar="N", help="Process only the first N incomplete contacts")
+    parser.add_argument("--rows", metavar="RANGE",
+                        help="Only process these Excel rows, e.g. 31-35, A31-A35 or 31,33,40-42 "
+                             "(keeps existing enriched data and the --resume position)")
     parser.add_argument("--resume", action="store_true", help="Resume from progress.json")
     parser.add_argument("--restart", action="store_true",
                         help="Ignore existing progress.json and start over (overwrites the enriched file)")
@@ -1978,6 +2013,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--delay must be >= 0")
     if args.resume and args.restart:
         parser.error("--resume and --restart are mutually exclusive")
+    if args.rows is not None:
+        try:
+            args.rows = parse_row_spec(args.rows)
+        except ValueError as exc:
+            parser.error(str(exc))
 
     input_path = os.path.abspath(args.input)
     if not os.path.isfile(input_path):
